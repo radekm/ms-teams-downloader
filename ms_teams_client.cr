@@ -9,6 +9,12 @@ alias JSONObject = Hash(String, JSON::Any)
 private class GraphPayload
   include JSON::Serializable
 
+  def initialize()
+    @odata_context = ""
+    @odata_count = 0
+    @value = [] of JSONObject
+  end
+
   @[JSON::Field(key: "@odata.context")]
   property odata_context : String
   @[JSON::Field(key: "@odata.count")]
@@ -48,6 +54,8 @@ end
 
 def_desc_type(:Team)
 def_desc_type(:Channel)
+def_desc_type(:Chat)
+def_desc_type(:Member)
 def_desc_type(:Message)
 
 class MsTeamsClient
@@ -74,6 +82,10 @@ class MsTeamsClient
 
         Log.info { "Too many requests waiting for #{retry_after} seconds" }
         sleep retry_after
+      when 403
+        # Not raising here makes client usage simpler.
+        Log.info { "Access to resource is forbidden" }
+        return GraphPayload.new
       else
         raise "Unexpected HTTP response: #{resp.inspect}"
       end
@@ -95,17 +107,11 @@ class MsTeamsClient
       new_items = payload.value.map { |json| {{item_type}}.new(json) }
       really_new = 0
       new_items.each do |item|
-        if !items.has_key? item.id
-          really_new += 1
-        else
+        if items.has_key? item.id
           Log.warn { "Duplicate #{ {{items_name}} }: old #{items[item.id]}, new: #{item}" }
         end
 
         items[item.id] = item
-      end
-
-      if really_new == 0
-        raise "No new #{ {{items_name}} }"
       end
 
       url = payload.odata_next_link
@@ -132,12 +138,42 @@ class MsTeamsClient
     get_items(ChannelDesc, :channels, all_link, delta_link)
   end
 
+  def list_members_of_channel(
+    team_id : String,
+    channel_id : String,
+    delta_link : String? = nil
+  ) : {members: Hash(String, MemberDesc), delta_link: String?}
+    all_link = "#{@graph_url}/teams/#{team_id}/channels/#{channel_id}/members"
+    get_items(MemberDesc, :members, all_link, delta_link)
+  end
+
   def list_messages_in_channel(
     team_id : String,
     channel_id : String,
     delta_link : String? = nil
   ) : {messages: Hash(String, MessageDesc), delta_link: String?}
     all_link = "#{@graph_url}/teams/#{team_id}/channels/#{channel_id}/messages"
+    get_items(MessageDesc, :messages, all_link, delta_link)
+  end
+
+  def list_chats(delta_link : String? = nil) : {chats: Hash(String, ChatDesc), delta_link: String?}
+    all_link = "#{@graph_url}/chats"
+    get_items(ChatDesc, :chats, all_link, delta_link)
+  end
+
+  def list_members_of_chat(
+    chat_id : String,
+    delta_link : String? = nil
+  ) : {members: Hash(String, MemberDesc), delta_link: String?}
+    all_link = "#{@graph_url}/chats/#{chat_id}/members"
+    get_items(MemberDesc, :members, all_link, delta_link)
+  end
+
+  def list_messages_in_chat(
+    chat_id : String,
+    delta_link : String? = nil
+  ) : {messages: Hash(String, MessageDesc), delta_link: String?}
+    all_link = "#{@graph_url}/chats/#{chat_id}/messages"
     get_items(MessageDesc, :messages, all_link, delta_link)
   end
 end
