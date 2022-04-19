@@ -1,0 +1,13 @@
+name: ms-teams-downloader
+version: 0.1.0
+
+authors:
+  - Radek Micek <radek.micek@gmail.com>
+
+crystal: ">= 1.4.0"
+
+license: MIT
+
+dependencies:
+  sqlite3:
+    github: crystal-lang/crystal-sqlite3
