@@ -57,6 +57,7 @@ def_desc_type(:Channel)
 def_desc_type(:Chat)
 def_desc_type(:Member)
 def_desc_type(:Message)
+def_desc_type(:Reply)
 
 class MsTeamsClient
   @graph_url = "https://graph.microsoft.com/beta"
@@ -154,6 +155,16 @@ class MsTeamsClient
   ) : {messages: Hash(String, MessageDesc), delta_link: String?}
     all_link = "#{@graph_url}/teams/#{team_id}/channels/#{channel_id}/messages"
     get_items(MessageDesc, :messages, all_link, delta_link)
+  end
+
+  def list_replies_to_message_in_channel(
+    team_id : String,
+    channel_id : String,
+    message_id : String,
+    delta_link : String? = nil
+  ) : {replies: Hash(String, ReplyDesc), delta_link: String?}
+    all_link = "#{@graph_url}/teams/#{team_id}/channels/#{channel_id}/messages/#{message_id}/replies"
+    get_items(ReplyDesc, :replies, all_link, delta_link)
   end
 
   def list_chats(delta_link : String? = nil) : {chats: Hash(String, ChatDesc), delta_link: String?}
