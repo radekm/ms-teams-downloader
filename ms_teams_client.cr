@@ -59,8 +59,33 @@ def_desc_type(:Member)
 def_desc_type(:Message)
 def_desc_type(:Reply)
 
+class TeamDesc
+  def display_name
+    @json["displayName"].as_s
+  end
+end
+
+class ChannelDesc
+  def display_name
+    @json["displayName"].as_s
+  end
+end
+
+class MessageDesc
+  def created_date_time
+    @json["createdDateTime"].as_s
+  end
+end
+
+class ReplyDesc
+  def created_date_time
+    @json["createdDateTime"].as_s
+  end
+end
+
 class MsTeamsClient
-  @graph_url = "https://graph.microsoft.com/beta"
+  @graph_url = "https://graph.microsoft.com/v1.0"
+  @graph_beta_url = "https://graph.microsoft.com/beta"
 
   def initialize(access_token : String)
     @headers = HTTP::Headers { "Authorization" => "bearer #{access_token}" }
@@ -127,7 +152,7 @@ class MsTeamsClient
   end
 
   def list_teams(delta_link : String? = nil) : {teams: Hash(String, TeamDesc), delta_link: String?}
-    all_link = "#{@graph_url}/teams"
+    all_link = "#{@graph_beta_url}/teams"
     get_items(TeamDesc, :teams, all_link, delta_link)
   end
 

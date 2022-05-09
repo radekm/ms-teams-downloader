@@ -1,0 +1,198 @@
+require "env"
+require "log"
+
+require "sqlite3"
+
+require "./ms_login"
+require "./ms_teams_client"
+
+client_id = ENV["TEAMS_CLIENT_ID"]? || raise "Missing environment variable TEAMS_CLIENT_ID"
+scopes = ["User.Read", "Chat.Read", "Team.ReadBasic.All", "Channel.ReadBasic.All"]
+db_url = "sqlite3://./ms_teams.db"
+
+sql_create_tables = [
+  <<-SQL,
+  CREATE TABLE IF NOT EXISTS channels (
+    id INTEGER PRIMARY KEY,
+    ms_team_id TEXT NOT NULL,
+    ms_channel_id TEXT NOT NULL,
+    team_name TEXT NOT NULL,
+    channel_name TEXT NOT NULL,
+    channel_json TEXT NOT NULL,
+    -- Date `YYYY-MM-DD` when channel messages were downloaded or empty string.
+    last_download TEXT NOT NULL DEFAULT '',
+    deleted INTEGER NOT NULL DEFAULT 0,
+    CONSTRAINT ak__channels
+      UNIQUE (ms_team_id, ms_channel_id)
+  )
+  SQL
+  <<-SQL
+  CREATE TABLE IF NOT EXISTS channel_messages (
+    id INTEGER PRIMARY KEY,
+    channel_id INTEGER NOT NULL,
+    ms_message_id TEXT NOT NULL,
+    message_json TEXT NOT NULL,
+    replies_json TEXT NOT NULL,  -- JSON array
+    CONSTRAINT ak__channel_messages
+      UNIQUE (channel_id, ms_message_id),
+    CONSTRAINT fk__channel_messages__channels
+      FOREIGN KEY (channel_id)
+      REFERENCES "channels" (id)
+      ON DELETE CASCADE
+  )
+  SQL
+]
+
+def download_channels(db, client : MsTeamsClient)
+  db.transaction do |tx|
+    # We mark all existing channels as deleted.
+    # Channels which are then returned by API are marked as non-deleted.
+    con = tx.connection
+    con.exec "UPDATE channels SET deleted = 1"
+
+    res = client.list_teams
+    res[:teams].each_value do |team|
+      res = client.list_channels team.id
+      res[:channels].each_value do |ch|
+        Log.info { "Found channel #{ch.display_name} in team #{team.display_name}" }
+
+        channel_json = ch.json.to_json
+
+        sql = "
+          INSERT INTO channels
+            (ms_team_id, ms_channel_id, team_name, channel_name, channel_json)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT (ms_team_id, ms_channel_id) DO UPDATE SET
+            team_name = ?,
+            channel_name = ?,
+            channel_json = ?,
+            deleted = 0
+          WHERE ms_team_id = ? AND ms_channel_id = ?
+        "
+        args = [] of DB::Any
+        # Insert.
+        args << team.id
+        args << ch.id
+        args << team.display_name
+        args << ch.display_name
+        args << channel_json
+        # Update.
+        args << team.display_name
+        args << ch.display_name
+        args << channel_json
+        # Where.
+        args << team.id
+        args << ch.id
+
+        con.exec sql, args: args
+      end
+    end
+  end
+end
+
+def download_messages_in_channel(
+  db,
+  client : MsTeamsClient,
+  channel_id : Int32,
+  ms_team_id : String,
+  ms_channel_id : String
+)
+  n_messages = 0
+  n_replies = 0
+
+  res = client.list_messages_in_channel(ms_team_id, ms_channel_id)
+  res[:messages].each_value do |message|
+    res = client.list_replies_to_message_in_channel(ms_team_id, ms_channel_id, message.id)
+
+    message_json = message.json.to_json
+    replies_json = res[:replies].values
+      .sort_by! { |reply| reply.created_date_time }
+      .map { |reply| reply.json }
+      .to_json
+
+    sql = "
+      INSERT INTO channel_messages
+        (channel_id, ms_message_id, message_json, replies_json)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT (channel_id, ms_message_id) DO UPDATE SET
+        message_json = ?,
+        replies_json = ?
+      WHERE channel_id = ? AND ms_message_id = ?
+    "
+    args = [] of DB::Any
+    # Insert.
+    args << channel_id
+    args << message.id
+    args << message_json
+    args << replies_json
+    # Update.
+    args << message_json
+    args << replies_json
+    # Where.
+    args << channel_id
+    args << message.id
+
+    db.exec sql, args: args
+
+    n_messages += 1
+    n_replies += res[:replies].size
+  end
+
+  Log.info { "Downloaded #{n_messages} messages and #{n_replies} replies" }
+end
+
+def download_messages_in_channels(
+  db,
+  client : MsTeamsClient,
+  skip_if_last_download_after : Time
+)
+  time_format = "%Y-%m-%d"
+  new_last_download = Time.utc.to_s time_format
+  channels = [] of {Int32, String, String, String, String}
+
+  # It's important that empty string (default value of `last_download`)
+  # is smaller than all `YYYY-MM-DD` dates.
+  # So channels where messages were not downloaded are returned.
+  sql = "
+    SELECT id, ms_team_id, ms_channel_id, team_name, channel_name
+    FROM channels
+    WHERE last_download <= ? AND deleted = 0
+  "
+  db.query sql, args: [skip_if_last_download_after.to_s time_format] do |rs|
+    rs.each do
+      channels << {rs.read(Int32), rs.read(String), rs.read(String),
+                   rs.read(String), rs.read(String)}
+    end
+  end
+
+  channels.each do |channel_id, ms_team_id, ms_channel_id, team_name, channel_name|
+    Log.info { "Downloading messages from channel #{channel_name} in team #{team_name}" }
+
+    download_messages_in_channel(db, client, channel_id, ms_team_id, ms_channel_id)
+
+    args = [] of DB::Any
+    args << new_last_download
+    args << channel_id
+    db.exec "UPDATE channels SET last_download = ? WHERE id = ?", args: args
+  end
+end
+
+login = MsLogin.new client_id, scopes
+login.get_verification_code
+
+puts "Go to #{login.verification_uri} and enter code #{login.verification_code}"
+
+login.wait_for_access_token()
+
+client = MsTeamsClient.new(login.access_token)
+
+DB.open db_url do |db|
+  sql_create_tables.each do |sql|
+    db.exec sql
+  end
+
+  skip_if_last_download_after = Time.utc(2022, 5, 6)
+
+  download_channels(db, client)
+  download_messages_in_channels(db, client, skip_if_last_download_after)
+end
