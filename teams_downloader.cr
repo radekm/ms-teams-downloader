@@ -41,7 +41,7 @@ sql_create_tables = [
       ON DELETE CASCADE
   )
   SQL
-  <<-SQL
+  <<-SQL,
   CREATE TABLE IF NOT EXISTS chats (
     id INTEGER PRIMARY KEY,
     ms_chat_id TEXT NOT NULL,
@@ -52,6 +52,20 @@ sql_create_tables = [
     last_download TEXT NOT NULL DEFAULT '',
     CONSTRAINT ak__chats
       UNIQUE (ms_chat_id)
+  )
+  SQL
+  <<-SQL
+  CREATE TABLE IF NOT EXISTS chat_messages (
+    id INTEGER PRIMARY KEY,
+    chat_id INTEGER NOT NULL,
+    ms_message_id TEXT NOT NULL,
+    message_json TEXT NOT NULL,
+    CONSTRAINT ak__chat_messages
+      UNIQUE (chat_id, ms_message_id),
+    CONSTRAINT fk__chat_messages__chats
+      FOREIGN KEY (chat_id)
+      REFERENCES "chats" (id)
+      ON DELETE CASCADE
   )
   SQL
 ]
@@ -232,6 +246,80 @@ def download_chats(db, client : MsTeamsClient)
   end
 end
 
+def download_messages_in_chat(
+  db,
+  client : MsTeamsClient,
+  chat_id : Int32,
+  ms_chat_id : String
+)
+  n_messages = 0
+
+  res = client.list_messages_in_chat ms_chat_id
+  res[:messages].each_value do |message|
+    message_json = message.json.to_json
+
+    sql = "
+      INSERT INTO chat_messages
+        (chat_id, ms_message_id, message_json)
+      VALUES (?, ?, ?)
+      ON CONFLICT (chat_id, ms_message_id) DO UPDATE SET
+        message_json = ?
+      WHERE chat_id = ? AND ms_message_id = ?
+    "
+    args = [] of DB::Any
+    # Insert.
+    args << chat_id
+    args << message.id
+    args << message_json
+    # Update.
+    args << message_json
+    # Where.
+    args << chat_id
+    args << message.id
+
+    db.exec sql, args: args
+
+    n_messages += 1
+  end
+
+  Log.info { "Downloaded #{n_messages} messages" }
+end
+
+def download_messages_in_chats(
+  db,
+  client : MsTeamsClient,
+  skip_if_last_download_after : Time
+)
+  time_format = "%Y-%m-%d"
+  new_last_download = Time.utc.to_s time_format
+  chats = [] of {Int32, String, String}
+
+  # It's important that empty string (default value of `last_download`)
+  # is smaller than all `YYYY-MM-DD` dates.
+  # So chats where messages were not downloaded are returned.
+  sql = "
+    SELECT id, ms_chat_id, chat_name
+    FROM chats
+    WHERE last_download <= ?
+  "
+  db.query sql, args: [skip_if_last_download_after.to_s time_format] do |rs|
+    rs.each do
+      chats << {rs.read(Int32), rs.read(String), rs.read(String)}
+    end
+  end
+
+  chats.each do |chat_id, ms_chat_id, chat_name|
+    Log.info { "Downloading messages from chat #{chat_name} (chat id #{ms_chat_id})" }
+
+    download_messages_in_chat(db, client, chat_id, ms_chat_id)
+
+    args = [] of DB::Any
+    args << new_last_download
+    args << chat_id
+    db.exec "UPDATE chats SET last_download = ? WHERE id = ?", args: args
+  end
+end
+
 login = MsLogin.new client_id, scopes
 login.get_verification_code
 
@@ -252,4 +340,5 @@ DB.open db_url do |db|
   download_messages_in_channels(db, client, skip_if_last_download_after)
 
   download_chats(db, client)
+  download_messages_in_chats(db, client, skip_if_last_download_after)
 end
