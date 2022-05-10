@@ -26,7 +26,7 @@ sql_create_tables = [
       UNIQUE (ms_team_id, ms_channel_id)
   )
   SQL
-  <<-SQL
+  <<-SQL,
   CREATE TABLE IF NOT EXISTS channel_messages (
     id INTEGER PRIMARY KEY,
     channel_id INTEGER NOT NULL,
@@ -39,6 +39,19 @@ sql_create_tables = [
       FOREIGN KEY (channel_id)
       REFERENCES "channels" (id)
       ON DELETE CASCADE
+  )
+  SQL
+  <<-SQL
+  CREATE TABLE IF NOT EXISTS chats (
+    id INTEGER PRIMARY KEY,
+    ms_chat_id TEXT NOT NULL,
+    chat_name TEXT NOT NULL,
+    chat_json TEXT NOT NULL,
+    members_json TEXT NOT NULL,
+    -- Date `YYYY-MM-DD` when chat messages were downloaded or empty string.
+    last_download TEXT NOT NULL DEFAULT '',
+    CONSTRAINT ak__chats
+      UNIQUE (ms_chat_id)
   )
   SQL
 ]
@@ -177,6 +190,48 @@ def download_messages_in_channels(
   end
 end
 
+def download_chats(db, client : MsTeamsClient)
+  res = client.list_chats
+  res[:chats].each_value do |ch|
+    res = client.list_members_of_chat ch.id
+
+    chat_name = ch.topic || res[:members].values.map { |member| member.display_name }.join ", "
+
+    Log.info { "Found chat #{chat_name} (chat id #{ch.id})" }
+
+    chat_json = ch.json.to_json
+    members_json = "[]"
+    members_json = res[:members].values
+      .map { |member| member.json }
+      .to_json
+
+    sql = "
+      INSERT INTO chats
+        (ms_chat_id, chat_name, chat_json, members_json)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT (ms_chat_id) DO UPDATE SET
+        chat_name = ?,
+        chat_json = ?,
+        members_json = ?
+      WHERE ms_chat_id = ?
+    "
+    args = [] of DB::Any
+    # Insert.
+    args << ch.id
+    args << chat_name
+    args << chat_json
+    args << members_json
+    # Update.
+    args << chat_name
+    args << chat_json
+    args << members_json
+    # Where.
+    args << ch.id
+
+    db.exec sql, args: args
+  end
+end
+
 login = MsLogin.new client_id, scopes
 login.get_verification_code
 
@@ -195,4 +250,6 @@ DB.open db_url do |db|
 
   download_channels(db, client)
   download_messages_in_channels(db, client, skip_if_last_download_after)
+
+  download_chats(db, client)
 end

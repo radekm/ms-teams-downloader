@@ -71,6 +71,18 @@ class ChannelDesc
   end
 end
 
+class ChatDesc
+  def topic
+    @json["topic"].as_s?
+  end
+end
+
+class MemberDesc
+  def display_name
+    @json["displayName"].as_s?
+  end
+end
+
 class MessageDesc
   def created_date_time
     @json["createdDateTime"].as_s
